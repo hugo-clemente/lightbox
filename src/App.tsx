@@ -5,40 +5,72 @@ import { getCurrent } from "@tauri-apps/api/window";
 import { XIcon, MinusIcon, SquareIcon } from "lucide-react";
 import { Button } from "./components/ui/button";
 
-const ImageCanvas = ({
-  image,
-  width,
-  height,
-}: {
-  image: number[];
-  width: number;
-  height: number;
-}) => {
+const FPSCounter = () => {
+
+  const [fps, setFps] = useState(0)
+
+  // @ts-expect-error
+  useEffect(() => {
+
+    let lastTime = Date.now(), nbFrames = 0;
+
+    const unsub = listen("image", (event) => {
+      // setPayload(event.payload as any);
+      const currentTime = Date.now()
+      nbFrames++
+      if(currentTime - lastTime >= 1000) {
+        setFps(nbFrames)
+        nbFrames = 0
+        lastTime = Date.now()
+      }
+    });
+
+    return () => unsub.then((u) => u());
+  }, []);
+
+  return <div>{fps}</div>
+}
+
+const ImageCanvas = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
+  // @ts-expect-error
   useEffect(() => {
-    if (width === 0 || height === 0 || image.length === 0) return;
+    const unsub = listen("image", (event) => {
+      const {width, height, image} = event.payload as {
+        image: number[];
+        width: number;
+        height: number;
+      } 
 
-    if (canvasRef.current) {
-      const ctx = canvasRef.current.getContext("2d");
+      if (canvasRef.current) {
+        const canvas = canvasRef.current
 
-      if (!ctx) {
-        return;
+        canvas.width = width
+        canvas.height = height
+
+        const ctx = canvas.getContext("2d");
+  
+        if (!ctx) {
+          return;
+        }
+  
+        console.log({ length: image.length, total: width * height * 4 });
+  
+        const imageData = ctx.createImageData(width, height);
+        imageData.data.set(image);
+        ctx.putImageData(imageData, 0, 0);
       }
+    });
 
-      console.log({ length: image.length, total: width * height * 4 });
-
-      const imageData = ctx.createImageData(width, height);
-      imageData.data.set(image);
-      ctx.putImageData(imageData, 0, 0);
-    }
-  }, [image]);
+    return () => unsub.then((u) => u());
+  }, []);
 
   return (
     <canvas
       ref={canvasRef}
-      width={width}
-      height={height}
+      width={0}
+      height={0}
       className="w-full h-full"
     />
   );
@@ -56,27 +88,6 @@ function App() {
     // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
     invoke("stop_capture");
   }
-
-  const [payload, setPayload] = useState<{
-    image: number[];
-    width: number;
-    height: number;
-  }>({
-    image: [],
-    width: 0,
-    height: 0,
-  });
-
-  console.log(payload);
-
-  // @ts-expect-error
-  useEffect(() => {
-    const unsub = listen("image", (event) => {
-      setPayload(event.payload as any);
-    });
-
-    return () => unsub.then((u) => u());
-  }, []);
 
   return (
     <div className="bg-red-800 p-2 h-full">
@@ -106,6 +117,7 @@ function App() {
             >
               <XIcon className="h-3 w-3" />
             </button>
+            
           </div>
         </header>
 
@@ -116,12 +128,10 @@ function App() {
 
             <Button type="submit" onClick={startCapture}>Start</Button>
             <Button type="submit" onClick={stopCapture}>Stop</Button>
+            <FPSCounter />
 
 
           <ImageCanvas
-            image={payload.image}
-            width={payload.width}
-            height={payload.height}
           />
         </div>
       </main>

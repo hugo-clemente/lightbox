@@ -11,9 +11,15 @@ use std::thread;
 use std::time::Duration;
 use tauri::{Manager, Window};
 
-use scap::{
-    capturer::{CGPoint, CGRect, CGSize, Capturer, Options},
-    frame::Frame,
+use scap::capturer::{CGPoint, CGRect, CGSize, Capturer, Options};
+
+use windows_capture::{
+    capture::GraphicsCaptureApiHandler,
+    encoder::ImageEncoder,
+    frame::{Frame, ImageFormat},
+    graphics_capture_api::InternalCaptureControl,
+    monitor::Monitor,
+    settings::{ColorFormat, CursorCaptureSettings, DrawBorderSettings, Settings},
 };
 
 #[derive(Clone, Serialize)]
@@ -21,6 +27,93 @@ struct Payload {
     image: Vec<u8>,
     width: u32,
     height: u32,
+}
+
+struct CaptureInit {
+    enabled: Arc<AtomicBool>,
+    app: tauri::AppHandle,
+}
+
+// This struct will be used to handle the capture events.
+struct Capture {
+    enabled: Arc<AtomicBool>,
+    app: tauri::AppHandle,
+    encoder: ImageEncoder,
+}
+
+impl GraphicsCaptureApiHandler for Capture {
+    // The type of flags used to get the values from the settings.
+    type Flags = CaptureInit;
+
+    // The type of error that can occur during capture, the error will be returned from `CaptureControl` and `start` functions.
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+
+    // Function that will be called to create the struct. The flags can be passed from settings.
+    fn new(flags: Self::Flags) -> Result<Self, Self::Error> {
+        let encoder = ImageEncoder::new(ImageFormat::Png, ColorFormat::Rgba8);
+
+        Ok(Self {
+            app: flags.app,
+            enabled: flags.enabled,
+            encoder,
+        })
+    }
+
+    // Called every time a new frame is available.
+    fn on_frame_arrived(
+        &mut self,
+        frame: &mut Frame,
+        capture_control: InternalCaptureControl,
+    ) -> Result<(), Self::Error> {
+        // Note: The frame has other uses too for example you can save a single for to a file like this:
+        // frame.save_as_image("frame.png", ImageFormat::Png)?;
+        // Or get the raw data like this so you have full control:
+        let w = frame.width();
+        let h = frame.height();
+
+        let mut frame_buffer = frame.buffer()?;
+        let data = frame_buffer.as_raw_buffer();
+
+        println!("width : {}, height : {}, buffer size {}", w, h, data.len());
+
+        println!("Got an image !");
+
+        if !self.enabled.load(Ordering::Relaxed) {
+            capture_control.stop();
+        }
+
+        let img: RgbaImage =
+            ImageBuffer::from_vec(w.try_into().unwrap(), h.try_into().unwrap(), data.to_vec())
+                .unwrap();
+
+        let resized_image: RgbaImage = resize(&img, 80, 45, FilterType::Nearest);
+
+        self.app
+            .emit(
+                "image",
+                Payload {
+                    image: resized_image.to_vec(),
+                    width: resized_image.width(),
+                    height: resized_image.height(),
+                },
+            )
+            .unwrap();
+
+        println!(
+            "Recieved BGRA frame of width {} and height {}",
+            frame.width(),
+            frame.height(),
+        );
+
+        Ok(())
+    }
+
+    // Optional handler called when the capture item (usually a window) closes.
+    fn on_closed(&mut self) -> Result<(), Self::Error> {
+        println!("Capture Session Closed");
+
+        Ok(())
+    }
 }
 
 pub struct InnerCaptureState {
@@ -48,202 +141,25 @@ impl InnerCaptureState {
         let enabled = self.enabled.clone();
 
         self.thread_handle = Some(thread::spawn(move || {
-            // let one_second = Duration::new(1, 0);
-            // let one_frame = one_second / 120;
+            let primary_monitor = Monitor::primary().expect("There is no primary monitor");
 
-            // let display = Display::primary().expect("Couldn't find primary display.");
-            // let mut capturer = Capturer::new(display).expect("Couldn't begin capture.");
-            // let (w, h) = (capturer.width(), capturer.height());
+            let settings = Settings::new(
+                // Item To Captue
+                primary_monitor,
+                // Capture Cursor Settings
+                CursorCaptureSettings::WithoutCursor,
+                // Draw Borders Settings
+                DrawBorderSettings::WithoutBorder,
+                // The desired color format for the captured frame.
+                ColorFormat::Rgba8,
+                // Additional flags for the capture settings that will be passed to user defined `new` function.
+                CaptureInit { app, enabled },
+            )
+            .unwrap();
 
-            //  while enabled.load(Ordering::Relaxed) {
-
-            //     // Wait until there's a frame.
-
-            //     let buffer: scrap::Frame<'_> = match capturer.frame() {
-            //         Ok(buffer) => buffer,
-            //         Err(error) => {
-            //             if error.kind() == WouldBlock {
-            //                 // Keep spinning.
-            //                 thread::sleep(one_frame);
-            //                 continue;
-            //             } else {
-            //                 panic!("Error: {}", error);
-            //             }
-            //         }
-            //     };
-
-            //     // Flip the ARGB image into a BGRA image.
-
-            //     let mut bitflipped = Vec::with_capacity(w * h * 3);
-            //     let stride = buffer.len() / h;
-
-            //     for y in 0..h {
-            //         for x in 0..w {
-            //             let i = stride * y + 4 * x;
-            //             bitflipped.extend_from_slice(&[buffer[i + 2], buffer[i + 1], buffer[i], 255]);
-            //         }
-            //     }
-
-            //     let img: RgbaImage =
-            //         ImageBuffer::from_vec(w.try_into().unwrap(), h.try_into().unwrap(), bitflipped)
-            //             .unwrap();
-
-            //     let resized_image: RgbaImage = resize(&img, 160, 90, FilterType::Nearest);
-            //     // println!("Resized image !");
-
-            //     app
-            //         .emit(
-            //             "image",
-            //             Payload {
-            //                 image: resized_image.to_vec(),
-            //                 width: resized_image.width(),
-            //                 height: resized_image.height(),
-            //             },
-            //         )
-            //         .unwrap();
-            // }
-            // #1 Check if the platform is supported
-            let supported = scap::is_supported();
-            if !supported {
-                println!("❌ Platform not supported");
-                return;
-            } else {
-                println!("✅ Platform supported");
-            }
-
-            // #2 Check if we have permission to capture the screen
-            let has_permission = scap::has_permission();
-            if !has_permission {
-                println!("❌ Permission not granted");
-                return;
-            } else {
-                println!("✅ Permission granted");
-            }
-
-            // #3 Get recording targets (WIP)
-            let targets = scap::get_targets();
-            println!("🎯 Targets: {:?}", targets);
-
-            // #4 Create Options
-            let options = Options {
-                fps: 30,
-                targets,
-                show_cursor: true,
-                show_highlight: false,
-                excluded_targets: None,
-                output_type: scap::frame::FrameType::BGRAFrame,
-                output_resolution: scap::capturer::Resolution::_480p,
-                ..Default::default()
-            };
-
-            // #5 Create Recorder
-            let mut recorder = Capturer::new(options);
-
-            // #6 Start Capture
-            recorder.start_capture();
-
-            // #7 Capture 100 frames
-            let mut start_time: u64 = 0;
-
-            while enabled.load(Ordering::Relaxed) {
-                let frame = recorder.get_next_frame().expect("Error");
-
-                match frame {
-                    Frame::YUVFrame(frame) => {
-                        println!(
-                            "Recieved YUV frame of width {} and height {} and pts {}",
-                            frame.width, frame.height, frame.display_time
-                        );
-                    }
-                    Frame::BGR0(frame) => {
-                        println!(
-                            "Received BGR0 frame of width {} and height {}",
-                            frame.width, frame.height
-                        );
-                    }
-                    Frame::RGB(frame) => {
-                        if (start_time == 0) {
-                            start_time = frame.display_time;
-                        }
-                        println!(
-                            "Recieved RGB frame of width {} and height {} and time {}",
-                            frame.width,
-                            frame.height,
-                            frame.display_time - start_time
-                        );
-                    }
-                    Frame::RGBx(frame) => {
-                        println!(
-                            "Recieved RGBx frame of width {} and height {}",
-                            frame.width, frame.height
-                        );
-                    }
-                    Frame::XBGR(frame) => {
-                        println!(
-                            "Recieved xRGB frame of width {} and height {}",
-                            frame.width, frame.height
-                        );
-                    }
-                    Frame::BGRx(frame) => {
-                        println!(
-                            "Recieved BGRx frame of width {} and height {}",
-                            frame.width, frame.height
-                        );
-                    }
-                    Frame::BGRA(frame) => {
-                        if (start_time == 0) {
-                            start_time = frame.display_time;
-                        }
-
-                        let w = frame.width;
-                        let h = frame.height;
-
-                        let mut bitflipped = Vec::with_capacity((w * h * 3).try_into().unwrap());
-                        let stride = frame.data.len() as i32 / h;
-
-                        for y in 0..h {
-                            for x in 0..w {
-                                let i = stride * y + 4 * x;
-                                bitflipped.extend_from_slice(&[
-                                    frame.data[usize::try_from(i + 2).unwrap()],
-                                    frame.data[usize::try_from(i + 1).unwrap()],
-                                    frame.data[usize::try_from(i).unwrap()],
-                                    255,
-                                ]);
-                            }
-                        }
-
-                        let img: RgbaImage = ImageBuffer::from_vec(
-                            w.try_into().unwrap(),
-                            h.try_into().unwrap(),
-                            bitflipped,
-                        )
-                        .unwrap();
-
-                        let resized_image: RgbaImage = resize(&img, 160, 90, FilterType::Nearest);
-
-                        app.emit(
-                            "image",
-                            Payload {
-                                image: resized_image.to_vec(),
-                                width: resized_image.width(),
-                                height: resized_image.height(),
-                            },
-                        )
-                        .unwrap();
-
-                        println!(
-                            "Recieved BGRA frame of width {} and height {} and time {}",
-                            frame.width,
-                            frame.height,
-                            frame.display_time - start_time
-                        );
-                    }
-                }
-            }
-
-            // #8 Stop Capture
-            recorder.stop_capture();
+            // Starts the capture and takes control of the current thread.
+            // The errors from handler trait will end up here
+            Capture::start(settings).expect("Screen Capture Failed");
         }));
     }
 
